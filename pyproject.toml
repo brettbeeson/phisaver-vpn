@@ -18,3 +18,8 @@ vpn = "cli:app"
 
 [tool.setuptools]
 py-modules = ["cli", "admin", "vpn"]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.22",
+]

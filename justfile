@@ -1,11 +1,9 @@
 default:
     @just --list
+    uv run python cli.py --help
+
+vpn *args:
+    uv run python cli.py {{args}}
 
 sso:
     aws sso login --profile phisaver
-
-launch *args:
-    uv run python cli.py aws launch {{ args }}
-
-status:
-    uv run python cli.py aws status

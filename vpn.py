@@ -30,9 +30,13 @@ def resolve_image(session, ami=DEFAULT_AMI):
     return image_id, image["RootDeviceName"]
 
 
-def ensure_key_pair(ec2, key_name, pem_dir=Path(".")):
-    """Create the key pair if missing, saving the private key as <key_name>.pem (0600)."""
-    pem = Path(pem_dir) / f"{key_name}.pem"
+def ensure_key_pair(ec2, key_name, pem=None):
+    """Return the private key path for an EC2 key pair, creating or importing the pair if missing.
+
+    With an existing local ``pem``, a missing AWS key pair is imported from it (public half only).
+    Without one, a missing pair is created and its private key saved as ./<key_name>.pem (0600).
+    """
+    pem = Path(pem).expanduser() if pem else Path(f"{key_name}.pem")
     try:
         ec2.describe_key_pairs(KeyNames=[key_name])
         if not pem.exists():
@@ -41,6 +45,12 @@ def ensure_key_pair(ec2, key_name, pem_dir=Path(".")):
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "InvalidKeyPair.NotFound":
             raise
+    if pem.exists():
+        public = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(pem)], check=True, capture_output=True
+        ).stdout
+        ec2.import_key_pair(KeyName=key_name, PublicKeyMaterial=public)
+        return pem
     material = ec2.create_key_pair(KeyName=key_name)["KeyMaterial"]
     # Create with 0600 from the start so the key is never world-readable.
     fd = os.open(pem, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -75,6 +85,7 @@ def launch_instance(
     name="openvpn",
     instance_type=DEFAULT_INSTANCE_TYPE,
     key_name=DEFAULT_KEY_NAME,
+    pem=None,
     security_group_name=DEFAULT_SECURITY_GROUP,
     ssh_cidr="0.0.0.0/0",
     root_volume_gb=DEFAULT_ROOT_VOLUME_GB,
@@ -83,7 +94,7 @@ def launch_instance(
     """Launch one instance and wait until running. Returns its description, or None on dry run."""
     ec2 = session.client("ec2")
     image_id, root_device = resolve_image(session)
-    pem = ensure_key_pair(ec2, key_name)
+    pem = ensure_key_pair(ec2, key_name, pem)
     group_id = ensure_security_group(ec2, security_group_name, ssh_cidr)
     options = {
         "ImageId": image_id,
@@ -116,6 +127,59 @@ def launch_instance(
     instance = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0]["Instances"][0]
     instance["PemFile"] = str(pem)
     return instance
+
+
+def ensure_elastic_ip(ec2, instance_id, name):
+    """Associate an Elastic IP tagged Name=<name> with the instance, allocating one if none is free.
+
+    Reuses an unassociated address with the same tag, so relaunching keeps the same IP.
+    Returns the public IP.
+    """
+    tag_filter = [{"Name": "tag:Name", "Values": [name]}]
+    free = [a for a in ec2.describe_addresses(Filters=tag_filter)["Addresses"] if "AssociationId" not in a]
+    if free:
+        allocation_id, public_ip = free[0]["AllocationId"], free[0]["PublicIp"]
+    else:
+        allocated = ec2.allocate_address(
+            Domain="vpc", TagSpecifications=[{"ResourceType": "elastic-ip", "Tags": [{"Key": "Name", "Value": name}]}]
+        )
+        allocation_id, public_ip = allocated["AllocationId"], allocated["PublicIp"]
+    ec2.associate_address(AllocationId=allocation_id, InstanceId=instance_id)
+    return public_ip
+
+
+def move_elastic_ip(ec2, source, target, release_displaced=False, dry_run=False):
+    """Move the Elastic IP on instance ``source`` to ``target`` (reverse the IDs to roll back).
+
+    Both instances must be running and ``source`` must hold exactly one EIP. An EIP already on
+    ``target`` is detached by the move; it is released afterwards only if ``release_displaced``.
+    Returns a dict describing the move (and what would happen, on a dry run).
+    """
+    if source == target:
+        raise ValueError("--from and --to must be different instances")
+    reservations = ec2.describe_instances(InstanceIds=[source, target])["Reservations"]
+    states = {i["InstanceId"]: i["State"]["Name"] for r in reservations for i in r["Instances"]}
+    for instance_id in (source, target):
+        if states.get(instance_id) != "running":
+            raise ValueError(f"{instance_id} is {states.get(instance_id, 'missing')}; both instances must be running")
+
+    def held_by(instance_id):
+        found = ec2.describe_addresses(Filters=[{"Name": "instance-id", "Values": [instance_id]}])["Addresses"]
+        return [{"AllocationId": a["AllocationId"], "PublicIp": a["PublicIp"]} for a in found]
+
+    moving = held_by(source)
+    if len(moving) != 1:
+        raise ValueError(f"{source} must hold exactly one Elastic IP; it has {len(moving)}")
+    displaced = held_by(target)
+    plan = {"moving": moving[0], "displaced": displaced, "released": [], "dry_run": dry_run}
+    if dry_run:
+        return plan
+    ec2.associate_address(AllocationId=moving[0]["AllocationId"], InstanceId=target, AllowReassociation=True)
+    if release_displaced:
+        for address in displaced:
+            ec2.release_address(AllocationId=address["AllocationId"])
+            plan["released"].append(address)
+    return plan
 
 
 def copy_bootstrap(host, pem, attempts=20, delay=10):

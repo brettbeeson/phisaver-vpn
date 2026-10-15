@@ -1,5 +1,5 @@
 #!/bin/bash
-# Read-only survey of an OpenVPN host. Run on the server: sudo bash inspect.sh [OUTFILE]
+# Read-only survey of an OpenVPN host, including its SSH/OS hardening. Run on the server: sudo bash inspect.sh [OUTFILE]
 # Writes a summary (no key material, only names/paths/permissions/fingerprints) to OUTFILE.
 # Nothing on the system is modified; the only write is OUTFILE.
 set -uo pipefail
@@ -160,6 +160,46 @@ sh_ "ls -la /var/log/openvpn* 2>/dev/null"
 
 section "Connected clients (status file)"
 sh_ "find /var/log /run -maxdepth 3 -name '*status*' -path '*openvpn*' -exec cat {} \; 2>/dev/null | head -40"
+section "Hardening: SSH daemon"
+sh_ "ssh -V 2>&1; sshd -V 2>&1 | head -1"
+sh_ "sshd -T 2>&1 | grep -Ei '^(kexalgorithms|ciphers|macs|hostkeyalgorithms|pubkeyacceptedalgorithms|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|permitrootlogin|pubkeyauthentication|allowusers|allowgroups|denyusers|maxauthtries|logingracetime|x11forwarding|permitemptypasswords|clientaliveinterval|clientalivecountmax|maxsessions|maxstartups|usepam|allowtcpforwarding|gatewayports|permittunnel|loglevel|banner|port|listenaddress|authenticationmethods|ignorerhosts|hostbasedauthentication) '"
+sh_ "grep -vE '^\\s*(#|\$)' /etc/ssh/sshd_config"
+sh_ "ls -la /etc/ssh/sshd_config.d 2>&1; for f in /etc/ssh/sshd_config.d/*.conf; do [ -f \"\$f\" ] && { echo \"--- \$f\"; grep -vE '^\\s*(#|\$)' \"\$f\"; }; done"
+sh_ "ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub 2>&1"
+sh_ "awk '{print \$1}' /etc/ssh/moduli | sort | uniq -c; awk '\$5 < 3071' /etc/ssh/moduli | wc -l"
+
+section "Hardening: accounts and access"
+sh_ "awk -F: '\$7 !~ /(nologin|false|sync|shutdown|halt)\$/ {print \$1, \$3, \$6, \$7}' /etc/passwd"
+sh_ "awk -F: '\$2 !~ /^[!*]/ {print \$1\" has a password hash\"}' /etc/shadow"
+sh_ "grep -rEh 'NOPASSWD|^[^#].*ALL' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^Defaults'"
+sh_ "for f in /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys; do [ -f \"\$f\" ] && { echo \"--- \$f\"; ssh-keygen -lf \"\$f\"; }; done"
+sh_ "grep -vE '^\\s*(#|\$)' /etc/pam.d/sshd"
+sh_ "grep -E '^(PASS_|UMASK|ENCRYPT_METHOD|LOGIN_RETRIES)' /etc/login.defs"
+sh_ "grep -vE '^\\s*(#|\$)' /etc/security/limits.conf /etc/security/pwquality.conf 2>/dev/null"
+sh_ "last -n 15 -w 2>&1 | head -20; lastb -n 5 -w 2>&1 | head -8"
+
+section "Hardening: brute-force, audit, integrity tooling"
+sh_ "rpm -qa 2>/dev/null | grep -Ei 'fail2ban|sshguard|denyhosts|crowdsec|aide|tripwire|auditd|audit-|rkhunter|chkrootkit|clamav|ossec|wazuh|lynis|yum-cron|dnf-automatic|selinux|firewalld|iptables-services|chrony|ntp' | sort"
+sh_ "systemctl is-enabled fail2ban sshguard auditd firewalld iptables ip6tables chronyd ntpd yum-cron 2>&1"
+sh_ "systemctl is-active fail2ban auditd chronyd 2>&1"
+sh_ "fail2ban-client status 2>&1; fail2ban-client status sshd 2>&1 | head -12"
+sh_ "ls -la /etc/fail2ban /etc/fail2ban/jail.d 2>&1 | head -20; grep -vE '^\\s*(#|\$)' /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.conf 2>/dev/null"
+sh_ "auditctl -l 2>&1 | head -40"
+sh_ "getenforce 2>&1; sestatus 2>&1 | head -6"
+sh_ "grep -vE '^\\s*(#|\$)' /etc/yum/yum-cron.conf 2>/dev/null | head -20; yum updateinfo summary 2>&1 | tail -8"
+sh_ "chronyc tracking 2>&1 | head -5"
+
+section "Hardening: kernel, network and filesystem"
+sh_ "sysctl -a 2>/dev/null | grep -E '^(net\\.ipv4\\.(conf\\.(all|default)\\.(rp_filter|accept_redirects|send_redirects|accept_source_route|log_martians|secure_redirects)|tcp_syncookies|icmp_echo_ignore_broadcasts|icmp_ignore_bogus_error_responses|ip_forward)|net\\.ipv6\\.conf\\.all\\.(accept_redirects|accept_ra|disable_ipv6)|kernel\\.(randomize_va_space|kptr_restrict|dmesg_restrict|yama\\.ptrace_scope|unprivileged_bpf_disabled|sysrq|core_pattern)|fs\\.(suid_dumpable|protected_symlinks|protected_hardlinks)) '"
+sh_ "grep -rvE '^\\s*(#|\$)' /etc/sysctl.conf /etc/sysctl.d 2>/dev/null"
+sh_ "ss -tulpn 2>&1"
+sh_ "mount | grep -E ' / | /tmp | /var | /home | /dev/shm ' ; grep -vE '^\\s*(#|\$)' /etc/fstab"
+sh_ "ls /etc/modprobe.d 2>&1; grep -rhE '^(install|blacklist)' /etc/modprobe.d 2>/dev/null"
+sh_ "cat /etc/issue /etc/issue.net 2>/dev/null | head -10; ls -la /etc/motd /etc/update-motd.d 2>&1 | head -10"
+sh_ "systemctl list-unit-files --state=enabled --no-legend | awk '{print \$1}' | tr '\\n' ' '"
+sh_ "ls -la /etc/cron.daily /etc/cron.hourly /etc/cron.d 2>&1 | head -30"
+sh_ "df -h / 2>&1; free -m 2>&1 | head -3; uptime"
+
 } > "$out" 2>&1
 
 chmod 600 "$out"

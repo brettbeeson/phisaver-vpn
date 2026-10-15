@@ -5,7 +5,6 @@ pki/ and issued/ are symlinks to private storage; nothing secret lives in this r
 
 import os
 import re
-import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,7 +143,7 @@ def revoke_client(name: str) -> Path:
     return PKI / "crl.pem"
 
 
-def ensure_crl() -> Path:
+def ensure_crl() -> Path: # CRL = Certificate Revocation List
     require_ca()
     crl = PKI / "crl.pem"
     if not crl.is_file():
@@ -189,18 +188,13 @@ def remote_host() -> str:
 
 
 def fetch_hosts(host: str | None = None) -> str:
-    result = subprocess.run(
-        ["ssh", host or remote_host(), "cat", HOSTS_PATH], check=True, capture_output=True, text=True, timeout=30
-    )
-    return result.stdout
+    command = ["ssh", *_ssh_opts(None), host or remote_host(), "cat", HOSTS_PATH]
+    return subprocess.run(command, check=True, capture_output=True, text=True, timeout=30).stdout
 
 
 def fetch_ipp(host: str | None = None) -> str:
-    result = subprocess.run(
-        ["ssh", host or remote_host(), "sudo", "cat", "/etc/openvpn/ipp.txt"],
-        check=True, capture_output=True, text=True, timeout=30,
-    )
-    return result.stdout
+    command = ["ssh", *_ssh_opts(None), host or remote_host(), "sudo", "cat", "/etc/openvpn/ipp.txt"]
+    return subprocess.run(command, check=True, capture_output=True, text=True, timeout=30).stdout
 
 
 def push_server(host: str, user: str = "ubuntu", pem: str | None = None, cn: str = DEFAULT_SERVER_CN, run: bool = True) -> None:
@@ -212,13 +206,13 @@ def push_server(host: str, user: str = "ubuntu", pem: str | None = None, cn: str
         "update-vpn-hosts.sh": SERVER_FILES / "update-vpn-hosts.sh",
         "dnsmasq-vpn.conf": SERVER_FILES / "dnsmasq-vpn.conf",
         "openvpn-override.conf": SERVER_FILES / "openvpn-override.conf",
-        "ca.crt": PKI / "ca.crt",
-        "server.crt": crt,
-        "server.key": key,
-        "ta.key": PKI / "ta.key",
-        "crl.pem": crl,
+        "ca.crt": PKI / "ca.crt", # CA's anchor certificate
+        "server.crt": crt, # Server on the VPN
+        "server.key": key, # Server on the VPN
+        "ta.key": PKI / "ta.key", # tls-auth key, DoS mitigation
+        "crl.pem": crl, # Certificate Revocation List
     }
-    ipp = PKI / "ipp.txt"
+    ipp = PKI / "ipp.txt" # current CN,IP
     if ipp.is_file():
         sources["ipp.txt"] = ipp
     for name, path in sources.items():
@@ -247,4 +241,4 @@ def kick(name: str, host: str, user: str = "ubuntu", pem: str | None = None) -> 
     """Disconnect a connected client via the management interface."""
     validate_name(name)
     command = f"printf 'kill {name}\\nquit\\n' | nc -q1 127.0.0.1 {MANAGEMENT_PORT}"
-    _run(["ssh", *_ssh_opts(pem), f"{user}@{host}", shlex.quote(command)])
+    _run(["ssh", *_ssh_opts(pem), f"{user}@{host}", command])
