@@ -1,0 +1,10 @@
+[project]
+name = "vpn"
+version = "0.1.0"
+description = "OpenVPN setup on AWS"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "boto3>=1.43.114",
+    "typer>=0.27.3",
+]
