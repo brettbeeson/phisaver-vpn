@@ -1,3 +1,14 @@
+# No keys or secrets in this repo: pki/ and issued/ are symlinks to private storage.
+pki
+pki/
+issued
+issued/
 *.pem
+*.key
+*.env
+.env
+openvpn-*summary*.txt
 __pycache__/
 .venv/
+*.egg-info/
+build/

@@ -8,3 +8,13 @@ dependencies = [
     "boto3>=1.43.114",
     "typer>=0.27.3",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+vpn = "cli:app"
+
+[tool.setuptools]
+py-modules = ["cli", "admin", "vpn"]

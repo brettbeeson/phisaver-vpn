@@ -1,0 +1,10 @@
+# EasyRSA settings. Matches the subject of the existing certificates; contains no secrets.
+set_var EASYRSA_DN          "org"
+set_var EASYRSA_REQ_COUNTRY "AU"
+set_var EASYRSA_REQ_PROVINCE "Queensland"
+set_var EASYRSA_REQ_CITY    "Brisbane"
+set_var EASYRSA_REQ_ORG     "PhiSaverCertificate Co"
+set_var EASYRSA_REQ_EMAIL   "brettbeeson@fastmail.com"
+set_var EASYRSA_REQ_OU      "Main"
+# A lapsed CRL makes OpenVPN reject every client; the default (180 days) is too short.
+set_var EASYRSA_CRL_DAYS    3650
