@@ -12,8 +12,13 @@ CONF=/etc/openvpn/server
 LIB=/var/lib/openvpn
 SSHD_DROPIN=/etc/ssh/sshd_config.d/00-vpn-hardening.conf
 SSH_USERS="${SSH_USERS:-$(printf '%s\n' ubuntu "$(id -un)" | sort -u | tr '\n' ' ')}"
-# Post-quantum hybrids first, then one well-vetted classical exchange for older clients.
-KEX_WANTED="mlkem768x25519-sha256 sntrup761x25519-sha512 sntrup761x25519-sha512@openssh.com curve25519-sha256"
+# Post-quantum hybrids only (no classical fallback): clients need OpenSSH 8.5+ (sntrup) or 9.9+ (ML-KEM).
+# Override with KEX_WANTED="... curve25519-sha256" to allow older clients.
+KEX_WANTED="${KEX_WANTED:-mlkem768x25519-sha256 sntrup761x25519-sha512 sntrup761x25519-sha512@openssh.com}"
+# Carried over from the old server's sshd_config (authenticated encryption and ETM MACs only).
+CIPHERS_WANTED="chacha20-poly1305@openssh.com aes256-gcm@openssh.com aes128-gcm@openssh.com aes256-ctr aes192-ctr aes128-ctr"
+MACS_WANTED="umac-128-etm@openssh.com hmac-sha2-256-etm@openssh.com hmac-sha2-512-etm@openssh.com"
+HOSTKEYS_WANTED="ssh-ed25519 rsa-sha2-512 rsa-sha2-256"
 
 for f in server.conf update-vpn-hosts.sh dnsmasq-vpn.conf openvpn-override.conf \
          ca.crt server.crt server.key ta.key crl.pem; do
@@ -51,7 +56,22 @@ sudo apt-get install -y -qq dnsmasq
 
 # Client-to-client traffic is switched inside OpenVPN; the kernel does not forward.
 sudo rm -f /etc/sysctl.d/99-openvpn.conf
-sudo sysctl -w net.ipv4.ip_forward=0 >/dev/null
+cat > /tmp/99-vpn-hardening.conf <<'SYSCTL'
+# Managed by bootstrap.sh
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.all.log_martians = 1
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+SYSCTL
+if put 0644 /tmp/99-vpn-hardening.conf /etc/sysctl.d/99-vpn-hardening.conf; then
+  sudo sysctl -p /etc/sysctl.d/99-vpn-hardening.conf >/dev/null
+fi
+rm -f /tmp/99-vpn-hardening.conf
 
 sudo install -d -m 0755 "$CONF"
 if put 0644 "$STAGE/server.conf" "$CONF/server.conf"; then RESTART=1; fi
@@ -76,25 +96,39 @@ if put 0644 "$STAGE/openvpn-override.conf" \
 fi
 
 # --- SSH hardening -----------------------------------------------------------
-# Offer only the key exchanges this sshd supports, so one unknown name can't break sshd.
-kex=""
-for alg in $KEX_WANTED; do
-  if ssh -Q kex | grep -qx "$alg"; then kex="${kex:+$kex,}$alg"; fi
-done
-case "$kex" in
-  *curve25519-sha256*) ;;
-  *) echo "sshd lacks curve25519-sha256; refusing to write a KexAlgorithms list" >&2; exit 1 ;;
-esac
+# Offer only the algorithms this sshd supports, so one unknown name can't break sshd.
+supported() {  # supported QUERY WANTED... -> comma list of wanted names that ssh -Q QUERY knows
+  local query=$1 alg out=""
+  shift
+  for alg in "$@"; do
+    if ssh -Q "$query" | grep -qx "$alg"; then out="${out:+$out,}$alg"; fi
+  done
+  printf '%s' "$out"
+}
+kex=$(supported kex $KEX_WANTED)
+ciphers=$(supported cipher $CIPHERS_WANTED)
+macs=$(supported mac $MACS_WANTED)
+hostkeys=$(supported sig $HOSTKEYS_WANTED)
+[ -n "$ciphers" ] && [ -n "$macs" ] && [ -n "$hostkeys" ] || {
+  echo "sshd supports none of the wanted ciphers/MACs/host key types" >&2; exit 1; }
+[ -n "$kex" ] || { echo "sshd supports none of: $KEX_WANTED; refusing to write KexAlgorithms" >&2; exit 1; }
 
 sshd_tmp=$(mktemp)
 cat > "$sshd_tmp" <<SSHD
 # Managed by bootstrap.sh. Named 00- so it is read before cloud-init's 50- file (first value wins).
 KexAlgorithms $kex
+Ciphers $ciphers
+MACs $macs
+HostKeyAlgorithms $hostkeys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
 PubkeyAuthentication yes
 X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+GatewayPorts no
+PermitTunnel no
 AllowUsers $SSH_USERS
 MaxAuthTries 3
 LoginGraceTime 20
@@ -116,6 +150,21 @@ else
   fi
 fi
 sudo rm -f "$SSHD_DROPIN.prev" "$sshd_tmp"
+
+# --- automatic security updates ----------------------------------------------
+# The host clock is UTC; 17:00 UTC is 03:00 in Brisbane (AEST, no daylight saving).
+# A reboot only happens when an update needs one; clients reconnect within a minute or two.
+REBOOT_TIME_UTC="${REBOOT_TIME_UTC:-17:00}"
+sudo apt-get install -y -qq unattended-upgrades
+cat > /tmp/52vpn-unattended.conf <<UU
+// Managed by bootstrap.sh
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "$REBOOT_TIME_UTC";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+UU
+put 0644 /tmp/52vpn-unattended.conf /etc/apt/apt.conf.d/52vpn-unattended.conf || true
+rm -f /tmp/52vpn-unattended.conf
+sudo systemctl enable apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 
 # --- services ----------------------------------------------------------------
 [ "$DAEMON_RELOAD" = 1 ] && sudo systemctl daemon-reload

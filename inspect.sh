@@ -166,7 +166,7 @@ sh_ "sshd -T 2>&1 | grep -Ei '^(kexalgorithms|ciphers|macs|hostkeyalgorithms|pub
 sh_ "grep -vE '^\\s*(#|\$)' /etc/ssh/sshd_config"
 sh_ "ls -la /etc/ssh/sshd_config.d 2>&1; for f in /etc/ssh/sshd_config.d/*.conf; do [ -f \"\$f\" ] && { echo \"--- \$f\"; grep -vE '^\\s*(#|\$)' \"\$f\"; }; done"
 sh_ "ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub 2>&1"
-sh_ "awk '{print \$1}' /etc/ssh/moduli | sort | uniq -c; awk '\$5 < 3071' /etc/ssh/moduli | wc -l"
+sh_ "echo 'moduli by bit size (count size):'; awk '!/^#/ {print \$5}' /etc/ssh/moduli | sort -n | uniq -c"
 
 section "Hardening: accounts and access"
 sh_ "awk -F: '\$7 !~ /(nologin|false|sync|shutdown|halt)\$/ {print \$1, \$3, \$6, \$7}' /etc/passwd"
